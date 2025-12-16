@@ -1,0 +1,7 @@
+<permissions>
+    <privapp-permissions package="br.tv.hallo.jptvmais.launcher">
+        <permission name="android.permission.INSTALL_PACKAGES"/>
+        <permission name="android.permission.DELETE_PACKAGES"/>
+        <permission name="android.permission.REQUEST_INSTALL_PACKAGES"/>
+    </privapp-permissions>
+</permissions>
