@@ -10,10 +10,10 @@ android {
 
     defaultConfig {
         applicationId = "br.tv.hallo.jptvmais.launcher"
-        minSdk = 23
+        minSdk = 24
         targetSdk = 34  // Ajustado para matching compileSdk
-        versionCode = 1
-        versionName = "1.1"
+        versionCode = 12
+        versionName = "1.2"
         vectorDrawables {
             useSupportLibrary = true
         }

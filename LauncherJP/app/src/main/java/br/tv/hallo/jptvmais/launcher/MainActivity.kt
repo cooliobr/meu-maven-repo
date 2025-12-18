@@ -1,8 +1,10 @@
 package br.tv.hallo.jptvmais.launcher
 
-import android.R.attr.orientation
+import android.app.ActivityManager
+import android.app.admin.DevicePolicyManager
+import android.content.ComponentName
+import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
 import android.os.Bundle
@@ -10,214 +12,167 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.view.Gravity
-import android.view.ViewGroup
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
-import androidx.lifecycle.lifecycleScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import java.io.DataOutputStream
-import java.io.IOException
 import java.net.NetworkInterface
 import java.util.Collections
 
 class MainActivity : AppCompatActivity() {
-    private val TAG = "LauncherActivity"
+
     private val TARGET_PACKAGE = "br.tv.hallo.jptvmais"
     private lateinit var updateManager: UpdateManager
     private val handler = Handler(Looper.getMainLooper())
-    private var notAllowedDialog: AlertDialog? = null
-    private val CHECK_AUTH_INTERVAL = 5000L // 5 segundos
-    private var isAuthorized = false
+
+    private var blockedDialog: AlertDialog? = null
+    private var isBlocked = false
+
+    private val authRunnable = object : Runnable {
+        override fun run() {
+            updateManager.checkAuthorization()
+            handler.postDelayed(this, 50_000)
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val rootLayout = LinearLayout(this).apply {
-            layoutParams = ViewGroup.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT
-            )
+
+        setContentView(LinearLayout(this).apply {
             setBackgroundColor(Color.BLACK)
             gravity = Gravity.CENTER
-        }
-        setContentView(rootLayout)
+            addView(TextView(this@MainActivity).apply {
+                text = "Inicializando…"
+                setTextColor(Color.WHITE)
+                textSize = 22f
+            })
+        })
 
         updateManager = UpdateManager(this)
-        updateManager.startPeriodicUpdateCheck() // Inicia checagens periódicas futuras
-        // Verificação inicial
-        lifecycleScope.launch {
-            performInitialUpdateCheck()
-        }
-        // Iniciar checagem periódica de autorização
-        startPeriodicAuthCheck()
+        handler.post(authRunnable)
     }
 
-    private suspend fun performInitialUpdateCheck() {
-        return withContext(Dispatchers.IO) {
-            val currentVersion = updateManager.getCurrentVersion() ?: return@withContext launchTargetAppOnMain() // Prosseguir se erro
-            val (storeVersion, apkName, liberado) = updateManager.getStoreVersionAndApk()
-            withContext(Dispatchers.Main) {
-                if (!liberado) {
-                    forceStopTargetApp()
-                    showNotAllowedMessage()
-                } else if (storeVersion != null && apkName != null && updateManager.isStoreVersionNewer(currentVersion, storeVersion)) {
-                    val skipCount = updateManager.getSkipCount()
-                    if (skipCount >= updateManager.MAX_SKIPS) {
-                        updateManager.forceUpdate(storeVersion, apkName)
-                    } else {
-                        updateManager.showUpdateDialog(storeVersion, apkName, skipCount)
-                    }
-                } else {
-                    launchTargetApp()
-                }
-                isAuthorized = liberado
-            }
-        }
+    /* =====================
+       FOREGROUND
+       ===================== */
+    fun bringToFront() {
+        val intent = Intent(this, MainActivity::class.java)
+        intent.addFlags(
+            Intent.FLAG_ACTIVITY_NEW_TASK or
+                    Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                    Intent.FLAG_ACTIVITY_SINGLE_TOP
+        )
+        startActivity(intent)
     }
 
-    private fun startPeriodicAuthCheck() {
-        handler.postDelayed({
-            checkAuthorization()
-        }, CHECK_AUTH_INTERVAL)
-    }
-
-    private fun checkAuthorization() {
-        Thread {
-            val (storeVersion, apkName, liberado) = updateManager.getStoreVersionAndApk()
-            handler.post {
-                if (liberado) {
-                    if (!isAuthorized) {
-                        // Transição para liberado
-                        notAllowedDialog?.dismiss()
-                        notAllowedDialog = null
-                        val currentVersion = updateManager.getCurrentVersion() ?: ""
-                        if (storeVersion != null && apkName != null && updateManager.isStoreVersionNewer(currentVersion, storeVersion)) {
-                            val skipCount = updateManager.getSkipCount()
-                            if (skipCount >= updateManager.MAX_SKIPS) {
-                                updateManager.autoUpdate(storeVersion, apkName)
-                            } else {
-                                updateManager.showUpdateDialog(storeVersion, apkName, skipCount)
-                            }
-                        } else {
-                            launchTargetApp()
-                        }
-                    }
-                } else {
-                    forceStopTargetApp()
-                    showNotAllowedMessage()
-                }
-                isAuthorized = liberado
-                startPeriodicAuthCheck() // Continuar checando
-            }
-        }.start()
-    }
-
+    /* =====================
+       APP CONTROL
+       ===================== */
     fun launchTargetApp() {
-        if (isAppInstalled(TARGET_PACKAGE)) {
-            val launchIntent = packageManager.getLaunchIntentForPackage(TARGET_PACKAGE)
-            if (launchIntent != null) {
-                startActivity(launchIntent)
-                Log.d(TAG, "Lançando app: $TARGET_PACKAGE")
-            } else {
-                Log.e(TAG, "Intent de lançamento não encontrado para $TARGET_PACKAGE")
-            }
-        } else {
-            Log.e(TAG, "App $TARGET_PACKAGE não instalado")
-            val installIntent = Intent(Intent.ACTION_VIEW, android.net.Uri.parse("market://details?id=$TARGET_PACKAGE"))
-            startActivity(installIntent)
-        }
+        if (isBlocked) return
+        val intent = packageManager.getLaunchIntentForPackage(TARGET_PACKAGE)
+        intent?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        startActivity(intent)
     }
 
-    private fun isAppInstalled(packageName: String): Boolean {
-        return try {
-            packageManager.getPackageInfo(packageName, 0)
-            true
-        } catch (e: PackageManager.NameNotFoundException) {
-            false
-        }
+    fun killTargetApp() {
+        val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+        am.killBackgroundProcesses(TARGET_PACKAGE)
     }
 
-    fun forceStopTargetApp() {
+    /* =====================
+       BLOCK / UNBLOCK
+       ===================== */
+    fun blockDevice(mac: String) {
+
+        if (isBlocked) return
+        isBlocked = true
+
+        val dpm = getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
+        val admin = ComponentName(this, MyDeviceAdminReceiver::class.java)
+
+        if (!dpm.isAdminActive(admin)) {
+            Log.e("DEVICE_ADMIN", "Admin NÃO ativo")
+            showBlockedDialog(mac)
+            return
+        }
+
         try {
-            val process = Runtime.getRuntime().exec("su")
-            val output = DataOutputStream(process.outputStream)
-            output.writeBytes("am force-stop $TARGET_PACKAGE\n")
-            output.writeBytes("exit\n")
-            output.flush()
-            process.waitFor()
-            Log.d(TAG, "Forçando parada do app: $TARGET_PACKAGE")
-        } catch (e: IOException) {
-            Log.e(TAG, "Erro ao forçar parada do app", e)
-        } catch (e: InterruptedException) {
-            Log.e(TAG, "Interrupção ao forçar parada do app", e)
+            dpm.setLockTaskPackages(admin, arrayOf(packageName))
+            startLockTask()
+            showBlockedDialog(mac)
+            Log.d("DEVICE_ADMIN", "LOCKTASK ATIVO")
+        } catch (e: Exception) {
+            Log.e("DEVICE_ADMIN", "Erro LockTask", e)
         }
     }
 
-    fun showNotAllowedMessage() {
-        if (notAllowedDialog != null && notAllowedDialog!!.isShowing) {
-            return // Já mostrando
-        }
-        val mac = getMacAddress()
-        val customView = LinearLayout(this).apply {
+    fun unblockDevice() {
+
+        isBlocked = false
+        blockedDialog?.dismiss()
+        blockedDialog = null
+
+        val dpm = getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
+        val admin = ComponentName(this, MyDeviceAdminReceiver::class.java)
+
+        if (!dpm.isAdminActive(admin)) return
+
+        try {
+            stopLockTask()
+            dpm.setLockTaskPackages(admin, emptyArray())
+        } catch (_: Exception) {}
+    }
+
+    /* =====================
+       UI BLOCK
+       ===================== */
+    private fun showBlockedDialog(mac: String) {
+
+        if (blockedDialog?.isShowing == true) return
+
+        val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(48, 48, 48, 48)
-            setBackgroundColor(Color.parseColor("#333333")) // Fundo cinza escuro para o diálogo
+            setPadding(60, 60, 60, 60)
             gravity = Gravity.CENTER
+            setBackgroundColor(Color.parseColor("#222222"))
 
             addView(TextView(this@MainActivity).apply {
-                text = "Dispositivo Não Liberado"
-                textSize = 24f
-                setTypeface(null, Typeface.BOLD)
+                text = "DISPOSITIVO BLOQUEADO"
+                textSize = 26f
                 setTextColor(Color.WHITE)
+                setTypeface(null, Typeface.BOLD)
                 gravity = Gravity.CENTER
-                setPadding(0, 0, 0, 16)
             })
 
             addView(TextView(this@MainActivity).apply {
-                text = "O dispositivo se encontra não liberado.\nMAC: $mac"
+                text = "\nEste equipamento não está liberado.\n\nMAC:\n$mac"
                 textSize = 18f
                 setTextColor(Color.LTGRAY)
                 gravity = Gravity.CENTER
             })
         }
 
-        notAllowedDialog = AlertDialog.Builder(this)
-            .setView(customView)
+        blockedDialog = AlertDialog.Builder(this)
+            .setView(layout)
             .setCancelable(false)
-            .create().apply {
-                window?.setBackgroundDrawableResource(android.R.color.transparent) // Fundo transparente para o diálogo
-            }
-        notAllowedDialog?.show()
+            .create()
+
+        blockedDialog?.show()
     }
 
-    private fun getMacAddress(): String {
-        try {
+    /* =====================
+       MAC ETH0
+       ===================== */
+    fun getEth0MacAddress(): String {
+        return try {
             val interfaces = Collections.list(NetworkInterface.getNetworkInterfaces())
-            for (intf in interfaces) {
-                if (intf.name.equals("eth0", ignoreCase = true)) {
-                    val mac = intf.hardwareAddress ?: return "unknown"
-                    return mac.joinToString(":") { "%02x".format(it) }
-                }
-            }
+            interfaces.firstOrNull { it.name.equals("eth0", true) }
+                ?.hardwareAddress
+                ?.joinToString(":") { "%02X".format(it) }
+                ?: "unknown"
         } catch (e: Exception) {
-            Log.e(TAG, "Erro ao obter MAC address", e)
-        }
-        return "unknown"
-    }
-
-    override fun onDestroy() {
-        super.onDestroy()
-        handler.removeCallbacksAndMessages(null)
-        notAllowedDialog?.dismiss()
-    }
-
-    // Helper para chamar launch em Main thread se necessário
-    private suspend fun launchTargetAppOnMain() {
-        withContext(Dispatchers.Main) {
-            launchTargetApp()
+            "unknown"
         }
     }
 }
